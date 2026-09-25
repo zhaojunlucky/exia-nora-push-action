@@ -1,0 +1,57 @@
+name: 'Push Docker image to Nora'
+description: >-
+  Push a saved Docker image archive to Nora over GitHub Actions OIDC
+  (audience "nora"). The calling job must set `permissions: id-token: write`.
+inputs:
+  archive:
+    description: 'Path to a `docker save` tar archive'
+    required: true
+  image:
+    description: 'Primary REGISTRY/REPOSITORY:TAG to push (immutable tag)'
+    required: true
+  moving-tag:
+    description: >-
+      Optional second REGISTRY/REPOSITORY:TAG to also push (e.g. a
+      moving/"latest"-style tag), same registry as image
+    required: false
+    default: ''
+  crane-version:
+    description: 'Pinned crane version to install'
+    required: false
+    default: 'v0.20.6'
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26.x'
+        cache: false
+
+    - name: Install crane
+      shell: bash
+      run: go install github.com/google/go-containerregistry/cmd/crane@${{ inputs.crane-version }}
+
+    - name: Get nora OIDC token
+      id: nora-oidc
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const token = await core.getIDToken('nora');
+          core.setSecret(token);
+          core.setOutput('token', token);
+
+    - name: Push to Nora
+      shell: bash
+      env:
+        NORA_TOKEN: ${{ steps.nora-oidc.outputs.token }}
+        ARCHIVE: ${{ inputs.archive }}
+        IMAGE: ${{ inputs.image }}
+        MOVING_TAG: ${{ inputs.moving-tag }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$MOVING_TAG" ]]; then
+          "${{ github.action_path }}/../scripts/push-image.sh" "$ARCHIVE" "$IMAGE" "$MOVING_TAG"
+        else
+          "${{ github.action_path }}/../scripts/push-image.sh" "$ARCHIVE" "$IMAGE"
+        fi
