@@ -8,6 +8,9 @@ set -euo pipefail
 : "${NORA_TOKEN:?NORA_TOKEN is required}"
 archive=$1
 images=("${@:2}")
+# Optional: path to a JSON file recording what this (and any prior, same-job)
+# push actually landed - see append_record below. Unset/empty means skip.
+record_file=${NORA_PUSH_RECORD:-}
 registry=${images[0]%%/*}
 for image in "${images[@]}"; do
   [[ "$image" == */* && "$image" != *://* && -n "${image#*/}" ]] || {
@@ -57,6 +60,43 @@ echo 'Registry Bearer authentication preflight passed'
 jq -n --arg registry "$registry" \
   '{auths: {($registry): {registrytoken: env.NORA_TOKEN}}}' > "$auth_dir/config.json"
 unset NORA_TOKEN
+
+# append_record adds one JSON entry to record_file's top-level "pushes"
+# array (creating the file if needed), so a job that pushes both a Docker
+# image and a raw artifact ends up with one manifest of what actually landed
+# - see push-raw.sh for the raw-side entries appended into the same file.
+append_record() {
+  local entry=$1
+  local tmp
+  tmp=$(mktemp)
+  if [[ -f "$record_file" ]]; then
+    jq -c --argjson entry "$entry" '.pushes += [$entry]' "$record_file" > "$tmp"
+  else
+    jq -nc --argjson entry "$entry" '{pushes: [$entry]}' > "$tmp"
+  fi
+  mv "$tmp" "$record_file"
+}
+
+pushed_json='[]'
 for image in "${images[@]}"; do
-  DOCKER_CONFIG="$auth_dir" crane push "$archive" "$image"
+  # `crane push` prints REGISTRY/REPO@sha256:DIGEST of the pushed manifest.
+  pushed_ref=$(DOCKER_CONFIG="$auth_dir" crane push "$archive" "$image")
+  digest=${pushed_ref##*@}
+  echo "Pushed $archive -> $image ($digest)"
+  entry=$(jq -nc --arg kind docker --arg image "$image" --arg digest "$digest" \
+    '{kind: $kind, image: $image, digest: $digest}')
+  pushed_json=$(jq -c --argjson entry "$entry" '. + [$entry]' <<<"$pushed_json")
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    echo "- docker: \`$image\` @ \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+  fi
+  if [[ -n "$record_file" ]]; then
+    append_record "$entry"
+  fi
 done
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  {
+    echo "digest=$(jq -r '.[0].digest' <<<"$pushed_json")"
+    echo "pushed-json=$pushed_json"
+  } >> "$GITHUB_OUTPUT"
+fi

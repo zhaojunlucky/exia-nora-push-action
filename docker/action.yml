@@ -19,6 +19,21 @@ inputs:
     description: 'Pinned crane version to install'
     required: false
     default: 'v0.20.6'
+  record:
+    description: >-
+      Optional path to a JSON file to append a record of what this step
+      actually pushed to (created if missing). Shares its format with the
+      `raw` action's `record` input, so a job using both ends up with one
+      file listing everything that landed - see README.
+    required: false
+    default: ''
+outputs:
+  digest:
+    description: 'Digest of the primary (first) image pushed'
+    value: ${{ steps.push.outputs.digest }}
+  pushed-json:
+    description: 'JSON array of {kind, image, digest} for every reference pushed by this step'
+    value: ${{ steps.push.outputs.pushed-json }}
 runs:
   using: 'composite'
   steps:
@@ -42,12 +57,14 @@ runs:
           core.setOutput('token', token);
 
     - name: Push to Nora
+      id: push
       shell: bash
       env:
         NORA_TOKEN: ${{ steps.nora-oidc.outputs.token }}
         ARCHIVE: ${{ inputs.archive }}
         IMAGE: ${{ inputs.image }}
         MOVING_TAG: ${{ inputs.moving-tag }}
+        NORA_PUSH_RECORD: ${{ inputs.record }}
       run: |
         set -euo pipefail
         if [[ -n "$MOVING_TAG" ]]; then

@@ -19,6 +19,21 @@ inputs:
       Per-build paths should stay unique and never need this.
     required: false
     default: 'false'
+  record:
+    description: >-
+      Optional path to a JSON file to append a record of what this step
+      actually pushed to (created if missing). Shares its format with the
+      `docker` action's `record` input, so a job using both ends up with one
+      file listing everything that landed - see README.
+    required: false
+    default: ''
+outputs:
+  sha256:
+    description: 'sha256 of the pushed file'
+    value: ${{ steps.push.outputs.sha256 }}
+  pushed-json:
+    description: 'JSON object {kind, target, sha256, bytes, status} describing what this step pushed'
+    value: ${{ steps.push.outputs.pushed-json }}
 runs:
   using: 'composite'
   steps:
@@ -32,12 +47,14 @@ runs:
           core.setOutput('token', token);
 
     - name: Push raw artifact to Nora
+      id: push
       shell: bash
       env:
         NORA_TOKEN: ${{ steps.nora-oidc.outputs.token }}
         FILE: ${{ inputs.file }}
         TARGET: ${{ inputs.target }}
         ALLOW_OVERWRITE: ${{ inputs.allow-overwrite }}
+        NORA_PUSH_RECORD: ${{ inputs.record }}
       run: |
         set -euo pipefail
         if [[ "$ALLOW_OVERWRITE" == "true" ]]; then

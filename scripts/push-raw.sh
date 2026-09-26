@@ -13,6 +13,9 @@ allow_overwrite=0
 if [[ "${3:-}" == "--allow-overwrite" ]]; then
   allow_overwrite=1
 fi
+# Optional: path to a JSON file recording what this (and any prior, same-job)
+# push actually landed - shared format with push-image.sh's append_record.
+record_file=${NORA_PUSH_RECORD:-}
 
 [[ -f "$local_file" ]] || {
   echo "Local file not found: $local_file" >&2
@@ -62,10 +65,44 @@ fail() {
   exit 1
 }
 
+# record_push logs and, if requested, records what actually landed: the
+# target path, its sha256 and size, and whether this was a fresh push or an
+# overwrite of an existing (mutable) path - see push-image.sh's
+# append_record for the shared record-file format.
+record_push() {
+  local push_status=$1
+  local sha256 bytes entry
+  sha256=$(sha256sum "$local_file" | awk '{print $1}')
+  bytes=$(wc -c < "$local_file" | tr -d ' ')
+  entry=$(jq -nc --arg kind raw --arg target "$target" --arg sha256 "$sha256" \
+    --argjson bytes "$bytes" --arg status "$push_status" \
+    '{kind: $kind, target: $target, sha256: $sha256, bytes: $bytes, status: $status}')
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    echo "- raw: \`$target\` sha256:\`$sha256\` ($push_status)" >> "$GITHUB_STEP_SUMMARY"
+  fi
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      echo "sha256=$sha256"
+      echo "pushed-json=$entry"
+    } >> "$GITHUB_OUTPUT"
+  fi
+  if [[ -n "$record_file" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    if [[ -f "$record_file" ]]; then
+      jq -c --argjson entry "$entry" '.pushes += [$entry]' "$record_file" > "$tmp"
+    else
+      jq -nc --argjson entry "$entry" '{pushes: [$entry]}' > "$tmp"
+    fi
+    mv "$tmp" "$record_file"
+  fi
+}
+
 status=$(put "")
 case "$status" in
   200|201|204)
     echo "Pushed $local_file -> $url (HTTP $status)"
+    record_push pushed
     exit 0
     ;;
   409)
@@ -94,6 +131,7 @@ status=$(put "If-Match: $etag")
 case "$status" in
   200|201|204)
     echo "Overwrote $url (HTTP $status, If-Match: $etag)"
+    record_push overwritten
     ;;
   *)
     fail "$status"

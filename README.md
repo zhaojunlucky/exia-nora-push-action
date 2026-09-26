@@ -44,8 +44,11 @@ steps:
 ```
 
 Inputs: `archive` (required), `image` (required), `moving-tag` (optional),
-`crane-version` (optional, default `v0.20.6`). Installs Go + `crane` itself;
-no other setup needed.
+`crane-version` (optional, default `v0.20.6`), `record` (optional, see
+below). Installs Go + `crane` itself; no other setup needed.
+
+Outputs: `digest` (the primary image's digest) and `pushed-json` (a JSON
+array of `{kind, image, digest}`, one entry per reference actually pushed).
 
 ## `raw` — push a raw/generic artifact
 
@@ -61,7 +64,12 @@ steps:
 ```
 
 Inputs: `file` (required), `target` (required, `REGISTRY/PATH`),
-`allow-overwrite` (optional, default `false`).
+`allow-overwrite` (optional, default `false`), `record` (optional, see
+below).
+
+Outputs: `sha256` (of the pushed file) and `pushed-json` (a JSON object
+`{kind, target, sha256, bytes, status}`, `status` being `pushed` or
+`overwritten`).
 
 Nora raw objects are immutable by default — re-uploading the same path
 returns `409`. Give every build its own path (a run number or PR number
@@ -70,6 +78,56 @@ mutable pointer file such as `release/latest.json`; for that specific case
 only, pass `allow-overwrite: true`, which reads the current `ETag` and
 retries the upload with `If-Match` so a concurrent writer is detected
 instead of silently overwritten.
+
+## Recording what actually got pushed
+
+Every push (Docker or raw) is logged to the step's stdout and to
+`$GITHUB_STEP_SUMMARY`, so it's always visible in the Actions UI. To also
+get it as data - e.g. so a downstream promotion step can tell what this
+run actually produced instead of guessing a tag/path and treating "not
+found" as ambiguous - pass the same `record` path to every push step in a
+job:
+
+```yaml
+permissions:
+  id-token: write
+
+steps:
+  - run: docker save --output "$RUNNER_TEMP/app.tar" app:build
+  - uses: zhaojunlucky/exia-nora-push-action/docker@main
+    with:
+      archive: ${{ runner.temp }}/app.tar
+      image: nora.exia.app/my-repo-ci:pr-${{ github.event.pull_request.number }}-1.0.${{ github.run_number }}
+      record: ${{ runner.temp }}/nora-push.json
+  - uses: zhaojunlucky/exia-nora-push-action/raw@main
+    with:
+      file: dist/notes.txt
+      target: nora.exia.app/my-repo-ci/pr-${{ github.event.pull_request.number }}-1.0.${{ github.run_number }}/notes.txt
+      record: ${{ runner.temp }}/nora-push.json
+  - uses: actions/upload-artifact@v4
+    with:
+      name: nora-push-manifest
+      path: ${{ runner.temp }}/nora-push.json
+```
+
+Each push step appends one entry to the file's top-level `pushes` array
+(creating it on the first push), so after both steps above
+`nora-push.json` holds:
+
+```json
+{
+  "pushes": [
+    {"kind": "docker", "image": "nora.exia.app/my-repo-ci:pr-1-1.0.42", "digest": "sha256:..."},
+    {"kind": "raw", "target": "nora.exia.app/my-repo-ci/pr-1-1.0.42/notes.txt", "sha256": "...", "bytes": 123, "status": "pushed"}
+  ]
+}
+```
+
+If a job doesn't produce a Docker image or doesn't produce a raw artifact,
+that step simply never runs and `pushes` has no entry of that `kind` -
+which is the authoritative answer to "did this build actually produce a
+Docker image / a raw artifact", rather than inferring it from a registry
+404 after the fact.
 
 ## Design notes
 
